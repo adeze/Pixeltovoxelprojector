@@ -17,6 +17,7 @@ from interfaces import (
     DataSource, MotionDetector, RayCaster, VoxelAccumulator, 
     VoxelGrid, Transform
 )
+from data_models import FrameInfo
 from registry import (
     register_motion_detector, register_ray_caster, 
     register_accumulator, register_transform
@@ -53,9 +54,10 @@ class ImageSequenceDataSource(DataSource):
     def __len__(self) -> int:
         return len(self.flat_frames)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        frame_info = self.flat_frames[idx]
-        image_path = self.images_folder / frame_info["image_file"]
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, FrameInfo]:
+        frame_info_dict = self.flat_frames[idx]
+        frame_info = FrameInfo.model_validate(frame_info_dict)
+        image_path = self.images_folder / frame_info.image_file
         
         # Load image
         img = Image.open(image_path).convert('L')
@@ -67,8 +69,9 @@ class ImageSequenceDataSource(DataSource):
         
         return image_tensor, frame_info
     
-    def get_frame_info(self, idx: int) -> Dict[str, Any]:
-        return self.flat_frames[idx]
+    def get_frame_info(self, idx: int) -> FrameInfo:
+        frame_info_dict = self.flat_frames[idx]
+        return FrameInfo.model_validate(frame_info_dict)
 
 
 # Motion Detector Implementations

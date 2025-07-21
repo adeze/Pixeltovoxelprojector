@@ -16,6 +16,7 @@ import cv2
 
 from interfaces import DataSource, Transform
 from implementations import ImageSequenceDataSource
+from data_models import FrameInfo
 
 
 class MotionDetectionDataset(Dataset):
@@ -49,7 +50,7 @@ class MotionDetectionDataset(Dataset):
         for i in range(0, total_frames - sequence_length + 1, stride):
             # Check if frames are from same camera
             frame_infos = [data_source.get_frame_info(j) for j in range(i, i + sequence_length)]
-            camera_indices = [info.get("camera_index", 0) for info in frame_infos]
+            camera_indices = [info.camera_index for info in frame_infos]
             
             if all(cam == camera_indices[0] for cam in camera_indices):
                 self.valid_indices.append(i)

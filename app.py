@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 import numpy as np
+import pydantic
 import torch
 import yaml
 from PIL import Image
@@ -104,7 +105,7 @@ class MetadataHandler:
         try:
             metadata = self._get_camera_data_from_inputs(args[0], *args)
             if not metadata:
-                return "❌ Error: No cameras enabled.", "", gr.update()
+                return ["❌ Error: No cameras enabled.", "", gr.update()]
 
             output_path = "metadata.json"
             with open(output_path, "w") as f:

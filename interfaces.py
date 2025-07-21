@@ -11,6 +11,8 @@ import torch
 import numpy as np
 from pathlib import Path
 
+from data_models import FrameInfo
+
 
 class DataSource(ABC):
     """Abstract interface for data sources (images, videos, etc.)."""
@@ -21,7 +23,7 @@ class DataSource(ABC):
         pass
     
     @abstractmethod
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, FrameInfo]:
         """
         Get item at index.
         
@@ -31,7 +33,7 @@ class DataSource(ABC):
         pass
     
     @abstractmethod
-    def get_frame_info(self, idx: int) -> Dict[str, Any]:
+    def get_frame_info(self, idx: int) -> FrameInfo:
         """Get frame metadata for given index."""
         pass
 
