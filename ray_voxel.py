@@ -152,6 +152,8 @@ def process_all(
     metadata_path, images_folder, output_bin,
     use_mcubes=False, output_mesh="output_mesh.obj", config=None
 ):
+    if config is None:
+        raise ValueError("Configuration must be provided.")
     frames = load_metadata(metadata_path)
     frames_by_cam = {}
     for f in frames:
@@ -159,10 +161,10 @@ def process_all(
     for v in frames_by_cam.values():
         v.sort(key=lambda x: x.frame_index)
 
-    N = config.grid.size[0] if config else 500
-    voxel_size = config.grid.voxel_size if config else 6.0
-    grid_center = torch.tensor(config.grid.center if config else [0.0, 0.0, 500.0], dtype=torch.float32)
-    motion_threshold = config.motion_detection.threshold if config else 2.0
+    N = config.grid.size[0]
+    voxel_size = config.grid.voxel_size
+    grid_center = torch.tensor(config.grid.center, dtype=torch.float32)
+    motion_threshold = config.motion_detection.threshold
     alpha = 0.1
 
     voxel_grid = torch.zeros((N, N, N), dtype=torch.float32)
@@ -189,7 +191,7 @@ def process_all(
 
     if use_mcubes:
         print("Extracting mesh with PyMCubes...")
-        vertices, triangles = mcubes.marching_cubes(voxel_grid.numpy(), config.io.mesh_threshold if config else 0.5)
+        vertices, triangles = mcubes.marching_cubes(voxel_grid.numpy(), config.io.mesh_threshold)
         mcubes.export_obj(vertices, triangles, output_mesh)
         print(f"Saved mesh to {output_mesh}")
 
@@ -199,6 +201,8 @@ def process_video_stream(
     output_bin: str, duration_seconds: int,
     use_mcubes=False, output_mesh="output_mesh.obj"
 ):
+    if config is None:
+        raise ValueError("Configuration must be provided.")
     cap = cv2.VideoCapture(video_url)
     if not cap.isOpened():
         raise IOError(f"Cannot open video stream from URL: {video_url}")

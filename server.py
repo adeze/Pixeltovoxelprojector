@@ -400,7 +400,8 @@ async def handle_process_images(arguments: Dict[str, Any]) -> Sequence[TextConte
             str(images_folder),
             str(output_path),
             use_mcubes=extract_mesh,
-            output_mesh=str(mesh_path) if mesh_path else None
+            output_mesh=str(mesh_path) if mesh_path else None,
+            config=config
         )
         
         # Load and analyze results

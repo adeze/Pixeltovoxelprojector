@@ -537,7 +537,8 @@ def execute_process_command(args: argparse.Namespace) -> None:
             str(args.images_folder),
             str(args.output_path),
             use_mcubes=config.io.export_mesh,
-            output_mesh=str(args.mesh_output) if args.mesh_output else None
+            output_mesh=str(args.mesh_output) if args.mesh_output else None,
+            config=config
         )
         
         print(f"Voxel grid saved to: {args.output_path}")
