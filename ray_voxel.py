@@ -1,7 +1,10 @@
 import json
-import torch
+
+import mcubes  # Add at the top
 import numpy as np
+import torch
 from PIL import Image
+
 
 # 1. Data Structures
 class FrameInfo:
@@ -16,13 +19,16 @@ class FrameInfo:
         cp = entry.get("camera_position", [0.0, 0.0, 0.0])
         self.camera_position = torch.tensor(cp, dtype=torch.float32)
 
+
 # 2. Math Helpers
 def deg2rad(deg):
     return deg * np.pi / 180.0
 
+
 def normalize(v):
     norm = torch.norm(v)
     return v / norm if norm > 1e-12 else v
+
 
 def rotation_matrix_yaw_pitch_roll(yaw, pitch, roll):
     y, p, r = map(deg2rad, [yaw, pitch, roll])
@@ -34,11 +40,13 @@ def rotation_matrix_yaw_pitch_roll(yaw, pitch, roll):
     Rx = torch.tensor([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], dtype=torch.float32)
     return Rz @ Ry @ Rx
 
+
 # 3. Load Metadata
 def load_metadata(json_path):
     with open(json_path, "r") as f:
         data = json.load(f)
     return [FrameInfo(entry) for entry in data]
+
 
 # 4. Image Loading (Gray)
 def load_image_gray(img_path):
@@ -48,11 +56,13 @@ def load_image_gray(img_path):
     arr = np.clip(arr + noise, 0, 255)
     return torch.from_numpy(arr)
 
+
 # 5. Motion Detection
 def detect_motion(prev, curr, threshold):
     diff = torch.abs(curr - prev)
     changed = diff > threshold
     return changed, diff
+
 
 # 6. DDA Ray Traversal (see previous implementation in process_image.py)
 def cast_ray_into_grid(camera_pos, dir_normalized, N, voxel_size, grid_center):
@@ -62,7 +72,7 @@ def cast_ray_into_grid(camera_pos, dir_normalized, N, voxel_size, grid_center):
     grid_max = grid_center + half_size
 
     t_min = 0.0
-    t_max = float('inf')
+    t_max = float("inf")
 
     # Ray-box intersection
     for i in range(3):
@@ -105,8 +115,10 @@ def cast_ray_into_grid(camera_pos, dir_normalized, N, voxel_size, grid_center):
 
     def boundary_in_world_x(i_x):
         return grid_min[0] + i_x * voxel_size
+
     def boundary_in_world_y(i_y):
         return grid_min[1] + i_y * voxel_size
+
     def boundary_in_world_z(i_z):
         return grid_min[2] + i_z * voxel_size
 
@@ -117,7 +129,7 @@ def cast_ray_into_grid(camera_pos, dir_normalized, N, voxel_size, grid_center):
     def safe_div(num, den):
         eps = 1e-12
         if abs(den) < eps:
-            return float('inf')
+            return float("inf")
         return num / den
 
     next_bx = boundary_in_world_x(nx_x)
@@ -154,8 +166,15 @@ def cast_ray_into_grid(camera_pos, dir_normalized, N, voxel_size, grid_center):
             break
     return steps
 
+
 # 7. Main Pipeline
-def process_all(metadata_path, images_folder, output_bin):
+def process_all(
+    metadata_path,
+    images_folder,
+    output_bin,
+    use_mcubes=False,
+    output_mesh="output_mesh.obj",
+):
     frames = load_metadata(metadata_path)
     # Group by camera_index
     frames_by_cam = {}
@@ -180,7 +199,9 @@ def process_all(metadata_path, images_folder, output_bin):
             curr_img = load_image_gray(f"{images_folder}/{curr_info.image_file}")
             changed, diff = detect_motion(prev_img, curr_img, motion_threshold)
             cam_pos = curr_info.camera_position
-            cam_rot = rotation_matrix_yaw_pitch_roll(curr_info.yaw, curr_info.pitch, curr_info.roll)
+            cam_rot = rotation_matrix_yaw_pitch_roll(
+                curr_info.yaw, curr_info.pitch, curr_info.roll
+            )
             fov_rad = deg2rad(curr_info.fov_degrees)
             focal_len = (curr_img.shape[1] * 0.5) / np.tan(fov_rad * 0.5)
             for v in range(curr_img.shape[0]):
@@ -191,13 +212,15 @@ def process_all(metadata_path, images_folder, output_bin):
                     if pix_val < 1e-3:
                         continue
                     x = float(u) - 0.5 * curr_img.shape[1]
-                    y = - (float(v) - 0.5 * curr_img.shape[0])
+                    y = -(float(v) - 0.5 * curr_img.shape[0])
                     z = -focal_len
                     ray_cam = torch.tensor([x, y, z], dtype=torch.float32)
                     ray_cam = normalize(ray_cam)
                     ray_world = cam_rot @ ray_cam
                     ray_world = normalize(ray_world)
-                    steps = cast_ray_into_grid(cam_pos, ray_world, N, voxel_size, grid_center)
+                    steps = cast_ray_into_grid(
+                        cam_pos, ray_world, N, voxel_size, grid_center
+                    )
                     for rs in steps:
                         ix, iy, iz, dist = rs
                         attenuation = 1.0 / (1.0 + alpha * dist)
@@ -213,5 +236,14 @@ def process_all(metadata_path, images_folder, output_bin):
         f.write(voxel_grid.numpy().astype(np.float32).tobytes())
     print(f"Saved voxel grid to {output_bin}")
 
+    # Optionally extract and save mesh with PyMCubes
+    if use_mcubes:
+        print("Extracting mesh with PyMCubes...")
+        vertices, triangles = mcubes.marching_cubes(voxel_grid.numpy(), 0.5)
+        mcubes.export_obj(vertices, triangles, output_mesh)
+        print(f"Saved mesh to {output_mesh}")
+
+
 # Usage:
-# process_all("metadata.json", "image_folder", "output_voxel.bin")
+# process_all("metadata.json", "image_folder", "output_voxel.bin", use_mcubes=True, output_mesh="output_mesh.obj")# Usage:
+# process_all("metadata.json", "image_folder", "output_voxel.bin", use_mcubes=True, output_mesh="output_mesh.obj")
