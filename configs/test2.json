@@ -1,0 +1,30 @@
+[
+    {
+        "camera_index": 0,
+        "frame_index": 0,
+        "camera_position": [
+            0.0,
+            0.0,
+            0.0
+        ],
+        "yaw": 0.0,
+        "pitch": 0.0,
+        "roll": 0.0,
+        "fov_degrees": 60.0,
+        "image_file": "camera_0_frame_0000.png"
+    },
+    {
+        "camera_index": 1,
+        "frame_index": 0,
+        "camera_position": [
+            0.0,
+            0.0,
+            0.0
+        ],
+        "yaw": 0.0,
+        "pitch": 0.0,
+        "roll": 0.0,
+        "fov_degrees": 60.0,
+        "image_file": "camera_1_frame_0000.png"
+    }
+]
