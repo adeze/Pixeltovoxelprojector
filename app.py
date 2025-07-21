@@ -1,3 +1,4 @@
+
 """
 Simplified Gradio Web Interface for Pixeltovoxelprojector.
 
@@ -9,6 +10,7 @@ import os
 import shutil
 import tempfile
 import zipfile
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -28,6 +30,9 @@ from io_plugins import load_voxel_grid, save_voxel_grid, list_supported_formats
 from visualization import VisualizationManager
 from registry import list_available
 
+CONFIGS_DIR = "configs"
+MAX_CAMERAS = 8
+FIELDS_PER_CAMERA = 7 # enabled, pos_x, pos_y, pos_z, yaw, pitch, roll, fov
 
 class WebAppState:
     """Centralized state management for the web application."""
@@ -37,6 +42,9 @@ class WebAppState:
         self.vis_manager = VisualizationManager()
         self.current_voxel_grid = None
         self.temp_dir = tempfile.mkdtemp()
+        
+        # Ensure configs directory exists
+        os.makedirs(CONFIGS_DIR, exist_ok=True)
     
     def cleanup(self):
         """Clean up temporary resources."""
@@ -52,6 +60,139 @@ class WebAppState:
             "Default": create_default_config
         }
         return presets.get(preset_name, create_default_config)()
+
+
+class MetadataHandler:
+    """Handles metadata generation, saving, and loading."""
+
+    def _get_camera_data_from_inputs(self, num_cameras, *args) -> List[Dict]:
+        """Helper to extract camera data from flat argument list."""
+        metadata = []
+        # args[0] is num_cameras slider, args[1] is config_name, args[2] is saved_configs dropdown
+        # Camera data starts from index 3
+        camera_inputs = args[3:] 
+        
+        for i in range(int(num_cameras)):
+            cam_data = camera_inputs[i * FIELDS_PER_CAMERA : (i + 1) * FIELDS_PER_CAMERA]
+            is_enabled = cam_data[0]
+            
+            if not is_enabled:
+                continue
+
+            frame_info = {
+                "camera_index": i,
+                "frame_index": 0,
+                "camera_position": [float(cam_data[1]), float(cam_data[2]), float(cam_data[3])],
+                "yaw": float(cam_data[4]),
+                "pitch": float(cam_data[5]),
+                "roll": float(cam_data[6]),
+                "fov_degrees": float(cam_data[7]),
+                "image_file": f"camera_{i}_frame_0000.png"
+            }
+            metadata.append(frame_info)
+        return metadata
+
+    def generate_metadata(self, *args) -> Tuple[str, str]:
+        """Generate and save metadata.json from UI inputs."""
+        try:
+            num_cameras = args[0]
+            metadata = self._get_camera_data_from_inputs(num_cameras, *args)
+
+            if not metadata:
+                return "❌ Error: No cameras enabled. Enable at least one camera.", ""
+
+            output_path = "metadata.json"
+            with open(output_path, "w") as f:
+                json.dump(metadata, f, indent=4)
+            
+            success_msg = f"✅ Saved to {output_path} for {len(metadata)} camera(s)."
+            json_str = json.dumps(metadata, indent=4)
+            
+            return success_msg, json_str
+
+        except Exception as e:
+            return f"❌ Failed to generate metadata: {str(e)}", ""
+
+    def save_configuration(self, config_name, *args) -> Tuple[str, gr.Dropdown]:
+        """Save the current camera configuration to a named file."""
+        try:
+            if not config_name or not config_name.strip():
+                return "❌ Error: Configuration name cannot be empty.", gr.update()
+
+            num_cameras = args[0]
+            metadata = self._get_camera_data_from_inputs(num_cameras, *args)
+
+            if not metadata:
+                return "❌ Error: No cameras enabled. Cannot save an empty configuration.", gr.update()
+
+            filename = f"{config_name.strip().replace(' ', '_')}.json"
+            output_path = os.path.join(CONFIGS_DIR, filename)
+            
+            with open(output_path, "w") as f:
+                json.dump(metadata, f, indent=4)
+
+            return f"✅ Saved configuration to {output_path}", gr.update(choices=self.list_saved_configs())
+
+        except Exception as e:
+            return f"❌ Failed to save configuration: {str(e)}", gr.update()
+
+    def load_configuration(self, config_name: str):
+        """Load a named configuration and update the UI."""
+        try:
+            if not config_name:
+                raise ValueError("Configuration name not provided.")
+
+            config_path = os.path.join(CONFIGS_DIR, config_name)
+            with open(config_path, 'r') as f:
+                metadata = json.load(f)
+
+            num_loaded_cameras = len(metadata)
+            
+            # Create a flat list of values to update all UI components
+            # [num_cameras_slider, config_name, saved_configs, cam1_enabled, cam1_pos_x, ...]
+            update_values = [num_loaded_cameras, Path(config_name).stem, gr.update()]
+
+            all_cam_data = []
+            for i in range(MAX_CAMERAS):
+                if i < num_loaded_cameras:
+                    cam_info = metadata[i]
+                    pos = cam_info['camera_position']
+                    all_cam_data.extend([
+                        True,
+                        pos[0], pos[1], pos[2],
+                        cam_info['yaw'],
+                        cam_info['pitch'],
+                        cam_info['roll'],
+                        cam_info['fov_degrees']
+                    ])
+                else:
+                    # Reset fields for unused cameras
+                    all_cam_data.extend([False, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 60.0])
+            
+            update_values.extend(all_cam_data)
+            
+            # Also update visibility
+            visibility_updates = self.update_camera_visibility(num_loaded_cameras)
+            
+            return tuple(update_values) + visibility_updates
+
+        except Exception as e:
+            # Return updates that do nothing but prevent an error
+            no_op_updates = [gr.update() for _ in range(3 + MAX_CAMERAS * FIELDS_PER_CAMERA)]
+            visibility_updates = [gr.update() for _ in range(MAX_CAMERAS)]
+            return tuple(no_op_updates) + tuple(visibility_updates)
+
+    def list_saved_configs(self) -> List[str]:
+        """Return a list of saved .json configuration files."""
+        return [f for f in os.listdir(CONFIGS_DIR) if f.endswith('.json')]
+
+    def update_camera_visibility(self, num_cameras_str: str) -> Tuple:
+        """Update visibility of camera accordions based on slider value."""
+        try:
+            num_cameras = int(num_cameras_str)
+            return tuple(gr.update(visible=i < num_cameras) for i in range(MAX_CAMERAS))
+        except (ValueError, TypeError):
+            return tuple(gr.update(visible=False) for _ in range(MAX_CAMERAS))
 
 
 class ProcessingHandler:
@@ -360,6 +501,91 @@ class UtilityHandler:
         return '\n'.join(info)
 
 
+def create_metadata_tab(handler: MetadataHandler) -> gr.TabItem:
+    """Create the metadata generation tab with save/load functionality."""
+    
+    with gr.TabItem("📝 Metadata Generator") as tab:
+        gr.Markdown("## Camera Metadata Generator")
+        gr.Markdown("Configure, save, and load camera configurations.")
+
+        # --- UI Components ---
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### 💾 Save/Load Configuration")
+                with gr.Row():
+                    config_name = gr.Textbox(label="Configuration Name", placeholder="e.g., 'traffic_cam_setup_1'")
+                    saved_configs = gr.Dropdown(label="Saved Configurations", choices=handler.list_saved_configs())
+                with gr.Row():
+                    save_button = gr.Button("💾 Save")
+                    load_button = gr.Button("📂 Load")
+                    
+            with gr.Column(scale=1):
+                gr.Markdown("### ⚙️ General Settings")
+                num_cameras_slider = gr.Slider(label="Number of Cameras", minimum=1, maximum=MAX_CAMERAS, step=1, value=2)
+
+        gr.Markdown("---")
+        
+        camera_accordions = []
+        all_camera_inputs = []
+        for i in range(MAX_CAMERAS):
+            with gr.Accordion(f"Camera {i+1}", open=i<2, visible=i<2) as accordion:
+                enabled = gr.Checkbox(label="Enable Camera", value=i<2)
+                with gr.Row():
+                    pos_x = gr.Number(label="Position X", value=0.0)
+                    pos_y = gr.Number(label="Position Y", value=0.0)
+                    pos_z = gr.Number(label="Position Z", value=0.0)
+                with gr.Row():
+                    yaw = gr.Slider(label="Yaw (deg)", minimum=-180, maximum=180, value=0.0)
+                    pitch = gr.Slider(label="Pitch (deg)", minimum=-90, maximum=90, value=0.0)
+                    roll = gr.Slider(label="Roll (deg)", minimum=-180, maximum=180, value=0.0)
+                fov = gr.Slider(label="Field of View (deg)", minimum=10, maximum=120, value=60.0)
+                
+                camera_accordions.append(accordion)
+                all_camera_inputs.extend([enabled, pos_x, pos_y, pos_z, yaw, pitch, roll, fov])
+
+        gr.Markdown("---")
+        generate_button = gr.Button("📝 Generate metadata.json for Processing", variant="primary")
+        
+        with gr.Row():
+            gen_status = gr.Textbox(label="Status", lines=2, interactive=False)
+            gen_json_output = gr.Code(label="Generated JSON", language="json", interactive=False)
+
+        # --- Event Handling ---
+        
+        # Slider to control visibility of camera accordions
+        num_cameras_slider.change(
+            fn=handler.update_camera_visibility,
+            inputs=num_cameras_slider,
+            outputs=camera_accordions
+        )
+        
+        # Gather all inputs for handler functions
+        all_inputs = [num_cameras_slider, config_name, saved_configs] + all_camera_inputs
+
+        # Button to generate the main metadata.json
+        generate_button.click(
+            fn=handler.generate_metadata,
+            inputs=all_inputs,
+            outputs=[gen_status, gen_json_output]
+        )
+        
+        # Button to save a named configuration
+        save_button.click(
+            fn=handler.save_configuration,
+            inputs=[config_name] + all_inputs,
+            outputs=[gen_status, saved_configs]
+        )
+        
+        # Button to load a named configuration
+        load_button.click(
+            fn=handler.load_configuration,
+            inputs=saved_configs,
+            outputs=[num_cameras_slider, config_name, saved_configs] + all_camera_inputs + camera_accordions
+        )
+        
+    return tab
+
+
 def create_processing_tab(processor: ProcessingHandler) -> gr.TabItem:
     """Create the main processing tab."""
     
@@ -472,6 +698,7 @@ def create_interface():
     config_handler = ConfigurationHandler(app_state)
     vis_handler = VisualizationHandler(app_state)
     util_handler = UtilityHandler(app_state)
+    metadata_handler = MetadataHandler()
     
     with gr.Blocks(
         title="Pixeltovoxelprojector",
@@ -489,6 +716,9 @@ def create_interface():
         gr.Markdown("*3D voxel grid generation from image sequences*")
         
         with gr.Tabs():
+            # Metadata Tab
+            create_metadata_tab(metadata_handler)
+
             # Processing Tab
             create_processing_tab(processor)
             
