@@ -5,10 +5,10 @@ Requirements:
     pip install pyvista numpy
 
 Usage:
-    python pyvista_interactive_view_with_rotation_history.py
+    python voxelmotionviewer.py
 
 Description:
-    1) Loads voxel_grid.bin (written by your C++ code).
+    1) Loads voxel_grid.bin (written by your Python pipeline, e.g. ray_voxel.py).
     2) Interprets the 3D array shape as (Z, Y, X).
     3) Extracts top percentile of brightness.
     4) Applies an additional Euler rotation to the entire cloud (user-defined).
