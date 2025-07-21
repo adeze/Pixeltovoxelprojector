@@ -1,6 +1,7 @@
 import json
-
-import mcubes  # Add at the top
+import time
+import cv2
+import mcubes
 import numpy as np
 import torch
 from PIL import Image
@@ -64,186 +65,184 @@ def detect_motion(prev, curr, threshold):
     return changed, diff
 
 
-# 6. DDA Ray Traversal (see previous implementation in process_image.py)
+# 6. DDA Ray Traversal
 def cast_ray_into_grid(camera_pos, dir_normalized, N, voxel_size, grid_center):
     steps = []
     half_size = 0.5 * (N * voxel_size)
     grid_min = grid_center - half_size
     grid_max = grid_center + half_size
+    t_min, t_max = 0.0, float("inf")
 
-    t_min = 0.0
-    t_max = float("inf")
-
-    # Ray-box intersection
     for i in range(3):
-        origin = camera_pos[i].item()
-        d = dir_normalized[i].item()
-        mn = grid_min[i].item()
-        mx = grid_max[i].item()
+        origin, d = camera_pos[i].item(), dir_normalized[i].item()
+        mn, mx = grid_min[i].item(), grid_max[i].item()
         if abs(d) < 1e-12:
-            if origin < mn or origin > mx:
-                return steps
+            if origin < mn or origin > mx: return steps
         else:
-            t1 = (mn - origin) / d
-            t2 = (mx - origin) / d
-            t_near = min(t1, t2)
-            t_far = max(t1, t2)
-            if t_near > t_min:
-                t_min = t_near
-            if t_far < t_max:
-                t_max = t_far
-            if t_min > t_max:
-                return steps
+            t1, t2 = (mn - origin) / d, (mx - origin) / d
+            t_min, t_max = max(t_min, min(t1, t2)), min(t_max, max(t1, t2))
+            if t_min > t_max: return steps
 
-    if t_min < 0.0:
-        t_min = 0.0
-
-    # Start voxel
+    if t_min < 0.0: t_min = 0.0
     start_world = camera_pos + t_min * dir_normalized
-    fx = (start_world[0] - grid_min[0]) / voxel_size
-    fy = (start_world[1] - grid_min[1]) / voxel_size
-    fz = (start_world[2] - grid_min[2]) / voxel_size
-    ix = int(fx)
-    iy = int(fy)
-    iz = int(fz)
-    if ix < 0 or ix >= N or iy < 0 or iy >= N or iz < 0 or iz >= N:
-        return steps
+    ix, iy, iz = (int((start_world[i] - grid_min[i]) / voxel_size) for i in range(3))
+    if not (0 <= ix < N and 0 <= iy < N and 0 <= iz < N): return steps
 
-    step_x = 1 if dir_normalized[0] >= 0.0 else -1
-    step_y = 1 if dir_normalized[1] >= 0.0 else -1
-    step_z = 1 if dir_normalized[2] >= 0.0 else -1
-
-    def boundary_in_world_x(i_x):
-        return grid_min[0] + i_x * voxel_size
-
-    def boundary_in_world_y(i_y):
-        return grid_min[1] + i_y * voxel_size
-
-    def boundary_in_world_z(i_z):
-        return grid_min[2] + i_z * voxel_size
-
-    nx_x = ix + (1 if step_x > 0 else 0)
-    nx_y = iy + (1 if step_y > 0 else 0)
-    nx_z = iz + (1 if step_z > 0 else 0)
-
-    def safe_div(num, den):
-        eps = 1e-12
-        if abs(den) < eps:
-            return float("inf")
-        return num / den
-
-    next_bx = boundary_in_world_x(nx_x)
-    next_by = boundary_in_world_y(nx_y)
-    next_bz = boundary_in_world_z(nx_z)
-
-    t_max_x = safe_div(next_bx - camera_pos[0].item(), dir_normalized[0].item())
-    t_max_y = safe_div(next_by - camera_pos[1].item(), dir_normalized[1].item())
-    t_max_z = safe_div(next_bz - camera_pos[2].item(), dir_normalized[2].item())
-
-    t_delta_x = safe_div(voxel_size, abs(dir_normalized[0].item()))
-    t_delta_y = safe_div(voxel_size, abs(dir_normalized[1].item()))
-    t_delta_z = safe_div(voxel_size, abs(dir_normalized[2].item()))
-
+    step = torch.sign(dir_normalized)
+    t_delta = torch.abs(voxel_size / dir_normalized)
+    next_bound = grid_min + (torch.floor((start_world - grid_min) / voxel_size) + (step + 1) / 2) * voxel_size
+    t_max_v = (next_bound - camera_pos) / dir_normalized
+    
     t_current = t_min
-    step_count = 0
-
     while t_current <= t_max:
         steps.append((ix, iy, iz, t_current))
-        if t_max_x < t_max_y and t_max_x < t_max_z:
-            ix += step_x
-            t_current = t_max_x
-            t_max_x += t_delta_x
-        elif t_max_y < t_max_z:
-            iy += step_y
-            t_current = t_max_y
-            t_max_y += t_delta_y
+        t_max_min = torch.min(t_max_v)
+        if t_max_v[0] == t_max_min:
+            ix += int(step[0].item())
+            t_current = t_max_v[0].item()
+            t_max_v[0] += t_delta[0]
+        elif t_max_v[1] == t_max_min:
+            iy += int(step[1].item())
+            t_current = t_max_v[1].item()
+            t_max_v[1] += t_delta[1]
         else:
-            iz += step_z
-            t_current = t_max_z
-            t_max_z += t_delta_z
-        step_count += 1
-        if ix < 0 or ix >= N or iy < 0 or iy >= N or iz < 0 or iz >= N:
-            break
+            iz += int(step[2].item())
+            t_current = t_max_v[2].item()
+            t_max_v[2] += t_delta[2]
+        
+        if not (0 <= ix < N and 0 <= iy < N and 0 <= iz < N): break
     return steps
 
 
-# 7. Main Pipeline
+def _project_motion_to_grid(voxel_grid, changed, diff, cam_info, focal_len, N, voxel_size, grid_center, alpha):
+    """Helper to project detected motion from a single frame into the voxel grid."""
+    cam_pos = cam_info.camera_position
+    cam_rot = rotation_matrix_yaw_pitch_roll(cam_info.yaw, cam_info.pitch, cam_info.roll)
+    
+    # Vectorized pixel processing
+    changed_pixels = torch.nonzero(changed)
+    if changed_pixels.numel() == 0:
+        return
+
+    v, u = changed_pixels[:, 0], changed_pixels[:, 1]
+    pix_val = diff[v, u]
+
+    # Create rays in camera space
+    x = u.float() - 0.5 * diff.shape[1]
+    y = -(v.float() - 0.5 * diff.shape[0])
+    z = torch.full_like(x, -focal_len)
+    rays_cam = torch.stack([x, y, z], dim=1)
+    rays_cam = torch.nn.functional.normalize(rays_cam, dim=1)
+
+    # Transform rays to world space
+    rays_world = torch.matmul(rays_cam, cam_rot.T)
+
+    for i in range(rays_world.shape[0]):
+        ray_world = rays_world[i]
+        val = pix_val[i].item()
+        if val < 1e-3: continue
+        
+        steps = cast_ray_into_grid(cam_pos, ray_world, N, voxel_size, grid_center)
+        for ix, iy, iz, dist in steps:
+            attenuation = 1.0 / (1.0 + alpha * dist)
+            voxel_grid[ix, iy, iz] += val * attenuation
+
+# 7. Main Pipeline (File-based)
 def process_all(
-    metadata_path,
-    images_folder,
-    output_bin,
-    use_mcubes=False,
-    output_mesh="output_mesh.obj",
+    metadata_path, images_folder, output_bin,
+    use_mcubes=False, output_mesh="output_mesh.obj", config=None
 ):
     frames = load_metadata(metadata_path)
-    # Group by camera_index
     frames_by_cam = {}
     for f in frames:
         frames_by_cam.setdefault(f.camera_index, []).append(f)
     for v in frames_by_cam.values():
         v.sort(key=lambda x: x.frame_index)
 
-    N = 500
-    voxel_size = 6.0
-    grid_center = torch.tensor([0.0, 0.0, 500.0], dtype=torch.float32)
-    voxel_grid = torch.zeros((N, N, N), dtype=torch.float32)
-    motion_threshold = 2.0
+    N = config.grid.size[0] if config else 500
+    voxel_size = config.grid.voxel_size if config else 6.0
+    grid_center = torch.tensor(config.grid.center if config else [0.0, 0.0, 500.0], dtype=torch.float32)
+    motion_threshold = config.motion_detection.threshold if config else 2.0
     alpha = 0.1
 
+    voxel_grid = torch.zeros((N, N, N), dtype=torch.float32)
+
     for cam_frames in frames_by_cam.values():
-        if len(cam_frames) < 2:
-            continue
+        if len(cam_frames) < 2: continue
         prev_img = load_image_gray(f"{images_folder}/{cam_frames[0].image_file}")
         for i in range(1, len(cam_frames)):
             curr_info = cam_frames[i]
             curr_img = load_image_gray(f"{images_folder}/{curr_info.image_file}")
             changed, diff = detect_motion(prev_img, curr_img, motion_threshold)
-            cam_pos = curr_info.camera_position
-            cam_rot = rotation_matrix_yaw_pitch_roll(
-                curr_info.yaw, curr_info.pitch, curr_info.roll
-            )
+            
             fov_rad = deg2rad(curr_info.fov_degrees)
             focal_len = (curr_img.shape[1] * 0.5) / np.tan(fov_rad * 0.5)
-            for v in range(curr_img.shape[0]):
-                for u in range(curr_img.shape[1]):
-                    if not changed[v, u]:
-                        continue
-                    pix_val = diff[v, u].item()
-                    if pix_val < 1e-3:
-                        continue
-                    x = float(u) - 0.5 * curr_img.shape[1]
-                    y = -(float(v) - 0.5 * curr_img.shape[0])
-                    z = -focal_len
-                    ray_cam = torch.tensor([x, y, z], dtype=torch.float32)
-                    ray_cam = normalize(ray_cam)
-                    ray_world = cam_rot @ ray_cam
-                    ray_world = normalize(ray_world)
-                    steps = cast_ray_into_grid(
-                        cam_pos, ray_world, N, voxel_size, grid_center
-                    )
-                    for rs in steps:
-                        ix, iy, iz, dist = rs
-                        attenuation = 1.0 / (1.0 + alpha * dist)
-                        val = pix_val * attenuation
-                        if 0 <= ix < N and 0 <= iy < N and 0 <= iz < N:
-                            voxel_grid[ix, iy, iz] += val
+            
+            _project_motion_to_grid(voxel_grid, changed, diff, curr_info, focal_len, N, voxel_size, grid_center, alpha)
             prev_img = curr_img
 
-    # Save voxel grid to .bin
     with open(output_bin, "wb") as f:
         f.write(np.array([N], dtype=np.int32).tobytes())
         f.write(np.array([voxel_size], dtype=np.float32).tobytes())
         f.write(voxel_grid.numpy().astype(np.float32).tobytes())
     print(f"Saved voxel grid to {output_bin}")
 
-    # Optionally extract and save mesh with PyMCubes
     if use_mcubes:
         print("Extracting mesh with PyMCubes...")
-        vertices, triangles = mcubes.marching_cubes(voxel_grid.numpy(), 0.5)
+        vertices, triangles = mcubes.marching_cubes(voxel_grid.numpy(), config.io.mesh_threshold if config else 0.5)
         mcubes.export_obj(vertices, triangles, output_mesh)
         print(f"Saved mesh to {output_mesh}")
 
+# 8. New Pipeline (URL-based)
+def process_video_stream(
+    video_url: str, camera_info: FrameInfo, config,
+    output_bin: str, duration_seconds: int,
+    use_mcubes=False, output_mesh="output_mesh.obj"
+):
+    cap = cv2.VideoCapture(video_url)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video stream from URL: {video_url}")
 
-# Usage:
-# process_all("metadata.json", "image_folder", "output_voxel.bin", use_mcubes=True, output_mesh="output_mesh.obj")# Usage:
-# process_all("metadata.json", "image_folder", "output_voxel.bin", use_mcubes=True, output_mesh="output_mesh.obj")
+    N = config.grid.size[0]
+    voxel_size = config.grid.voxel_size
+    grid_center = torch.tensor(config.grid.center, dtype=torch.float32)
+    motion_threshold = config.motion_detection.threshold
+    alpha = 0.1
+    voxel_grid = torch.zeros((N, N, N), dtype=torch.float32)
+
+    ret, prev_frame_bgr = cap.read()
+    if not ret:
+        cap.release()
+        raise ValueError("Could not read the first frame from the video stream.")
+    
+    prev_img = torch.from_numpy(cv2.cvtColor(prev_frame_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32))
+    
+    fov_rad = deg2rad(camera_info.fov_degrees)
+    focal_len = (prev_img.shape[1] * 0.5) / np.tan(fov_rad * 0.5)
+
+    start_time = time.time()
+    while time.time() - start_time < duration_seconds:
+        ret, curr_frame_bgr = cap.read()
+        if not ret:
+            print("Video stream ended.")
+            break
+        
+        curr_img = torch.from_numpy(cv2.cvtColor(curr_frame_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32))
+        changed, diff = detect_motion(prev_img, curr_img, motion_threshold)
+        
+        _project_motion_to_grid(voxel_grid, changed, diff, camera_info, focal_len, N, voxel_size, grid_center, alpha)
+        prev_img = curr_img
+
+    cap.release()
+
+    with open(output_bin, "wb") as f:
+        f.write(np.array([N], dtype=np.int32).tobytes())
+        f.write(np.array([voxel_size], dtype=np.float32).tobytes())
+        f.write(voxel_grid.numpy().astype(np.float32).tobytes())
+    print(f"Saved voxel grid from stream to {output_bin}")
+
+    if use_mcubes:
+        print("Extracting mesh from stream data...")
+        vertices, triangles = mcubes.marching_cubes(voxel_grid.numpy(), config.io.mesh_threshold)
+        mcubes.export_obj(vertices, triangles, output_mesh)
+        print(f"Saved mesh to {output_mesh}")
