@@ -611,7 +611,8 @@ def create_interface():
     return demo
 
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for Gradio app."""
     demo = create_interface()
     demo.launch(
         share=False,
@@ -619,3 +620,6 @@ if __name__ == "__main__":
         server_port=7860,
         show_error=True
     )
+
+if __name__ == "__main__":
+    main()

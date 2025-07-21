@@ -1,7 +1,7 @@
 [project]
 name = "pixeltovoxelprojector"
 version = "0.1.0"
-description = "Add your description here"
+description = "Advanced 3D voxel grid generation from image sequences with motion detection"
 readme = "README.md"
 requires-python = ">=3.13.3"
 dependencies = [
@@ -24,3 +24,10 @@ dependencies = [
     "torch>=2.7.1",
     "torchvision>=0.21.1",
 ]
+
+[project.scripts]
+pixeltovoxel = "main:main"
+pixeltovoxel-gradio = "app:main"
+
+[project.entry-points."mcp.server"]
+pixeltovoxelprojector = "server:main"
