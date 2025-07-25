@@ -31,6 +31,21 @@ class ProcessingConfig(BaseModel):
     num_workers: int = Field(default=4, description="Number of worker processes")
     use_gpu: bool = Field(default=True, description="Use GPU for processing if available")
 
+class RTSPConfig(BaseModel):
+    """RTSP stream configuration."""
+    buffer_size: int = Field(default=1, description="RTSP buffer size for low latency (1-3 recommended)")
+    timeout_ms: int = Field(default=10000, description="RTSP connection timeout in milliseconds")
+    max_frames: Optional[int] = Field(default=None, description="Maximum frames to process from stream")
+    camera_position: List[float] = Field(default=[0.0, 0.0, 0.0], description="Camera position [x, y, z]")
+    camera_rotation: List[float] = Field(default=[0.0, 0.0, 0.0], description="Camera rotation [yaw, pitch, roll] in degrees")
+    fov_degrees: float = Field(default=60.0, description="Camera field of view in degrees")
+
+    @validator('camera_position', 'camera_rotation')
+    def check_camera_params(cls, v):
+        if len(v) != 3:
+            raise ValueError("must be a list of 3 numbers")
+        return v
+
 class IOConfig(BaseModel):
     """Input/output configuration."""
     output_format: str = Field(default="bin", description="Output format for voxel grid (bin, npy, hdf5)")
@@ -43,6 +58,7 @@ class PipelineConfig(BaseModel):
     motion_detection: MotionDetectionConfig = Field(default_factory=MotionDetectionConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     io: IOConfig = Field(default_factory=IOConfig)
+    rtsp: RTSPConfig = Field(default_factory=RTSPConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.dict()
@@ -128,4 +144,21 @@ def create_astronomical_config() -> PipelineConfig:
         motion_detection=MotionDetectionConfig(algorithm="optical_flow", threshold=0.5),
         processing=ProcessingConfig(use_gpu=True),
         io=IOConfig(output_format="hdf5", mesh_threshold=0.6)
+    )
+
+def create_rtsp_config() -> PipelineConfig:
+    """Create a configuration optimized for RTSP streaming."""
+    return PipelineConfig(
+        grid=GridConfig(size=[400, 400, 400], voxel_size=8.0),
+        motion_detection=MotionDetectionConfig(threshold=3.0, enhance_motion=True),
+        processing=ProcessingConfig(batch_size=8, use_gpu=True),
+        io=IOConfig(export_mesh=False, output_format="bin"),
+        rtsp=RTSPConfig(
+            buffer_size=1,
+            timeout_ms=5000, 
+            max_frames=100,
+            camera_position=[0.0, 0.0, 0.0],
+            camera_rotation=[0.0, 0.0, 0.0],
+            fov_degrees=60.0
+        )
     )

@@ -14,7 +14,8 @@ import yaml
 
 from config import (
     PipelineConfig, ConfigManager, create_default_config,
-    create_high_quality_config, create_fast_config, create_astronomical_config
+    create_high_quality_config, create_fast_config, create_astronomical_config,
+    create_rtsp_config
 )
 from implementations import ImageSequenceDataSource
 from datasets import create_motion_detection_dataloader
@@ -87,6 +88,24 @@ class ArgumentValidator:
             return fvalue
         except ValueError:
             raise argparse.ArgumentTypeError(f"Invalid float: {value}")
+    
+    @staticmethod
+    def validate_input_source(path: str) -> str:
+        """Validate input source (directory, file, or RTSP URL)."""
+        # RTSP URL
+        if path.lower().startswith(('rtsp://', 'rtmp://')):
+            return path
+        
+        # Check if it's a file
+        file_path = Path(path)
+        if file_path.is_file():
+            return str(file_path)
+        
+        # Check if it's a directory
+        if file_path.is_dir():
+            return str(file_path)
+        
+        raise argparse.ArgumentTypeError(f"Invalid input source: {path} (not a directory, file, or valid stream URL)")
 
 
 def create_main_parser() -> argparse.ArgumentParser:
@@ -97,8 +116,14 @@ def create_main_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic processing
+  # Basic processing with image folder
   pixeltovoxel process metadata.json images/ output.bin
+  
+  # Process RTSP stream
+  pixeltovoxel process metadata.json rtsp://user:pass@192.168.1.100:554/stream output.bin --max-frames 50
+  
+  # RTSP with custom camera settings
+  pixeltovoxel process metadata.json rtsp://camera.local/stream output.bin --camera-position 10 5 2 --camera-rotation 30 -10 0
   
   # With configuration file
   pixeltovoxel process metadata.json images/ output.bin --config config.yaml
@@ -171,9 +196,9 @@ def create_process_parser(subparsers):
         help="Path to metadata JSON file"
     )
     parser.add_argument(
-        "images_folder", 
-        type=ArgumentValidator.validate_directory_exists,
-        help="Folder containing input images"
+        "input_source", 
+        type=ArgumentValidator.validate_input_source,
+        help="Input source: folder with images, video file, or RTSP URL (rtsp://...)"
     )
     parser.add_argument(
         "output_path",
@@ -190,7 +215,7 @@ def create_process_parser(subparsers):
     )
     config_group.add_argument(
         "--preset",
-        choices=["default", "high-quality", "fast", "astronomical"],
+        choices=["default", "high-quality", "fast", "astronomical", "rtsp"],
         default="default",
         help="Use preset configuration"
     )
@@ -256,6 +281,48 @@ def create_process_parser(subparsers):
         "--no-gpu",
         action="store_true",
         help="Force CPU processing"
+    )
+    
+    # RTSP/Stream options
+    stream_group = parser.add_argument_group("Stream Processing (RTSP/Video)")
+    stream_group.add_argument(
+        "--max-frames",
+        type=ArgumentValidator.validate_positive_int,
+        help="Maximum number of frames to process from stream/video"
+    )
+    stream_group.add_argument(
+        "--rtsp-buffer-size",
+        type=ArgumentValidator.validate_positive_int,
+        default=1,
+        help="RTSP buffer size for low latency (1-3 recommended, default: 1)"
+    )
+    stream_group.add_argument(
+        "--rtsp-timeout",
+        type=ArgumentValidator.validate_positive_int,
+        default=10000,
+        help="RTSP connection timeout in milliseconds (default: 10000)"
+    )
+    stream_group.add_argument(
+        "--camera-position",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=[0.0, 0.0, 0.0],
+        help="Camera position for stream processing (default: 0 0 0)"
+    )
+    stream_group.add_argument(
+        "--camera-rotation",
+        type=float,
+        nargs=3,
+        metavar=("YAW", "PITCH", "ROLL"),
+        default=[0.0, 0.0, 0.0],
+        help="Camera rotation angles in degrees (default: 0 0 0)"
+    )
+    stream_group.add_argument(
+        "--camera-fov",
+        type=ArgumentValidator.validate_positive_float,
+        default=60.0,
+        help="Camera field of view in degrees (default: 60.0)"
     )
     
     # Output options
@@ -377,7 +444,7 @@ def create_config_parser(subparsers):
     )
     create_parser.add_argument(
         "--preset",
-        choices=["default", "high-quality", "fast", "astronomical"],
+        choices=["default", "high-quality", "fast", "astronomical", "rtsp"],
         default="default",
         help="Configuration preset to use"
     )
@@ -485,6 +552,8 @@ def execute_process_command(args: argparse.Namespace) -> None:
                 config = create_fast_config()
             elif args.preset == "astronomical":
                 config = create_astronomical_config()
+            elif args.preset == "rtsp":
+                config = create_rtsp_config()
             else:
                 config = create_default_config()
         
@@ -525,21 +594,85 @@ def execute_process_command(args: argparse.Namespace) -> None:
             config_manager.save_config(config, args.save_config)
             print(f"Configuration saved to: {args.save_config}")
         
-        # Create data source and process
-        print(f"Processing images from {args.images_folder} using {args.metadata_path}")
+        # Determine input type and process accordingly
+        input_source = str(args.input_source)
         
-        # Import processing functions
-        from ray_voxel import process_all
-        
-        # Execute processing
-        process_all(
-            str(args.metadata_path),
-            str(args.images_folder),
-            str(args.output_path),
-            use_mcubes=config.io.export_mesh,
-            output_mesh=str(args.mesh_output) if args.mesh_output else None,
-            config=config
-        )
+        if input_source.lower().startswith(('rtsp://', 'rtmp://')):
+            # RTSP stream processing
+            print(f"Processing RTSP stream: {input_source}")
+            
+            from process_image import process_rtsp_stream_realtime
+            
+            # Override RTSP config with command-line arguments
+            if args.max_frames:
+                config.rtsp.max_frames = args.max_frames
+            if args.rtsp_buffer_size != 1:  # Only override if different from default
+                config.rtsp.buffer_size = args.rtsp_buffer_size
+            if args.rtsp_timeout != 10000:  # Only override if different from default
+                config.rtsp.timeout_ms = args.rtsp_timeout
+            if args.camera_position != [0.0, 0.0, 0.0]:  # Only override if different from default
+                config.rtsp.camera_position = args.camera_position
+            if args.camera_rotation != [0.0, 0.0, 0.0]:  # Only override if different from default
+                config.rtsp.camera_rotation = args.camera_rotation
+            if args.camera_fov != 60.0:  # Only override if different from default
+                config.rtsp.fov_degrees = args.camera_fov
+                
+            # Use stream processing
+            voxel_grid = process_rtsp_stream_realtime(
+                rtsp_url=input_source,
+                camera_position=config.rtsp.camera_position,
+                yaw=config.rtsp.camera_rotation[0],
+                pitch=config.rtsp.camera_rotation[1], 
+                roll=config.rtsp.camera_rotation[2],
+                fov_degrees=config.rtsp.fov_degrees,
+                max_frames=config.rtsp.max_frames or 100,
+                N=config.grid.size[0],
+                voxel_size=config.grid.voxel_size,
+                grid_center=config.grid.center,
+                motion_threshold=config.motion_detection.threshold,
+                alpha=0.1,
+                rtsp_buffer_size=config.rtsp.buffer_size,
+                rtsp_timeout=config.rtsp.timeout_ms
+            )
+            
+            # Save voxel grid
+            import torch
+            import numpy as np
+            with open(args.output_path, "wb") as f:
+                N = voxel_grid.shape[0]
+                voxel_size = config.grid.voxel_size
+                f.write(np.array([N], dtype=np.int32).tobytes())
+                f.write(np.array([voxel_size], dtype=np.float32).tobytes()) 
+                f.write(voxel_grid.numpy().astype(np.float32).tobytes())
+                
+        elif Path(input_source).is_file() and input_source.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
+            # Video file processing
+            print(f"Processing video file: {input_source}")
+            
+            # For video files, we still need metadata for camera information
+            # This is a limitation - video files need separate metadata
+            from ray_voxel import process_all
+            
+            # Use existing process_all but note this expects image folder structure
+            print("Warning: Video file processing requires adaptation of existing pipeline")
+            print("Consider using RTSP stream or converting video to image sequence")
+            
+        else:
+            # Image folder processing (existing functionality)
+            print(f"Processing images from {input_source} using {args.metadata_path}")
+            
+            # Import processing functions
+            from ray_voxel import process_all
+            
+            # Execute processing
+            process_all(
+                str(args.metadata_path),
+                input_source,
+                str(args.output_path),
+                use_mcubes=config.io.export_mesh if hasattr(config.io, 'export_mesh') else False,
+                output_mesh=str(args.mesh_output) if args.mesh_output else None,
+                config=config
+            )
         
         print(f"Voxel grid saved to: {args.output_path}")
         
@@ -598,6 +731,8 @@ def execute_config_command(args: argparse.Namespace) -> None:
                 config = create_fast_config()
             elif args.preset == "astronomical":
                 config = create_astronomical_config()
+            elif args.preset == "rtsp":
+                config = create_rtsp_config()
             else:
                 config = create_default_config()
             

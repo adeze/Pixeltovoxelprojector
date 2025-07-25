@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -96,20 +96,182 @@ def detect_motion(
     return changed, diff
 
 
-def load_frames_from_video(video_path: str) -> List[torch.Tensor]:
+def load_frames_from_video(video_path: str, max_frames: Optional[int] = None, 
+                          rtsp_buffer_size: int = 1, rtsp_timeout: int = 10000) -> List[torch.Tensor]:
+    """
+    Load frames from video file or RTSP stream.
+    
+    Args:
+        video_path: Path to video file or RTSP URL (e.g., 'rtsp://username:password@ip:port/stream')
+        max_frames: Maximum number of frames to capture (None for all frames)
+        rtsp_buffer_size: Buffer size for RTSP streams (1-3 recommended for low latency)
+        rtsp_timeout: Timeout in milliseconds for RTSP connection
+    
+    Returns:
+        List of torch.Tensor frames in grayscale
+    """
     cap = cv2.VideoCapture(video_path)
+    
+    # Configure RTSP-specific settings if URL starts with rtsp://
+    if video_path.lower().startswith('rtsp://'):
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, rtsp_buffer_size)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, rtsp_timeout)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, rtsp_timeout)
+        print(f"Configured RTSP stream: buffer_size={rtsp_buffer_size}, timeout={rtsp_timeout}ms")
+    
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video source: {video_path}")
+    
     frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        arr = gray.astype(np.float32)
-        noise = np.random.uniform(-1, 1, arr.shape)
-        arr = np.clip(arr + noise, 0, 255)
-        frames.append(torch.from_numpy(arr))
-    cap.release()
+    frame_count = 0
+    
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                if video_path.lower().startswith('rtsp://'):
+                    print("RTSP stream ended or connection lost")
+                break
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            arr = gray.astype(np.float32)
+            noise = np.random.uniform(-1, 1, arr.shape)
+            arr = np.clip(arr + noise, 0, 255)
+            frames.append(torch.from_numpy(arr))
+            
+            frame_count += 1
+            if max_frames is not None and frame_count >= max_frames:
+                print(f"Reached maximum frame limit: {max_frames}")
+                break
+                
+    finally:
+        cap.release()
+        
+    print(f"Loaded {len(frames)} frames from {video_path}")
     return frames
+
+
+def process_rtsp_stream_realtime(rtsp_url: str, camera_position: List[float], 
+                                yaw: float = 0.0, pitch: float = 0.0, roll: float = 0.0,
+                                fov_degrees: float = 60.0, max_frames: int = 100,
+                                N: int = 500, voxel_size: float = 6.0,
+                                grid_center: List[float] = [0.0, 0.0, 500.0],
+                                motion_threshold: float = 2.0, alpha: float = 0.1,
+                                rtsp_buffer_size: int = 1, rtsp_timeout: int = 10000) -> torch.Tensor:
+    """
+    Process RTSP stream in real-time for motion detection and voxel grid generation.
+    
+    Args:
+        rtsp_url: RTSP stream URL (e.g., 'rtsp://username:password@ip:port/stream')
+        camera_position: Camera position [x, y, z]
+        yaw, pitch, roll: Camera rotation angles in degrees
+        fov_degrees: Field of view in degrees
+        max_frames: Maximum number of frames to process
+        N: Voxel grid size (N x N x N)
+        voxel_size: Size of each voxel in world units
+        grid_center: Center of the voxel grid [x, y, z]
+        motion_threshold: Threshold for motion detection
+        alpha: Distance attenuation factor
+        rtsp_buffer_size: RTSP buffer size for low latency
+        rtsp_timeout: RTSP connection timeout in milliseconds
+    
+    Returns:
+        torch.Tensor: Voxel grid with accumulated motion data
+    """
+    cap = cv2.VideoCapture(rtsp_url)
+    
+    # Configure RTSP settings
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, rtsp_buffer_size)
+    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, rtsp_timeout)
+    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, rtsp_timeout)
+    
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to connect to RTSP stream: {rtsp_url}")
+    
+    print(f"Connected to RTSP stream: {rtsp_url}")
+    print(f"Processing up to {max_frames} frames...")
+    
+    # Initialize voxel grid and camera parameters
+    voxel_grid = torch.zeros((N, N, N), dtype=torch.float32)
+    cam_pos = torch.tensor(camera_position, dtype=torch.float32)
+    cam_rot = rotation_matrix_yaw_pitch_roll(yaw, pitch, roll)
+    grid_center_tensor = torch.tensor(grid_center, dtype=torch.float32)
+    
+    prev_img = None
+    frame_count = 0
+    
+    try:
+        while frame_count < max_frames:
+            ret, frame = cap.read()
+            if not ret:
+                print("RTSP stream ended or connection lost")
+                break
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            curr_img = torch.from_numpy(gray.astype(np.float32))
+            
+            # Skip first frame (need previous frame for motion detection)
+            if prev_img is None:
+                prev_img = curr_img
+                frame_count += 1
+                continue
+            
+            # Detect motion
+            changed, diff = detect_motion(prev_img, curr_img, motion_threshold)
+            
+            # Process motion pixels
+            idxs = torch.nonzero(changed)
+            if idxs.numel() > 0:
+                u = idxs[:, 1].float()
+                v = idxs[:, 0].float()
+                pix_val = diff[idxs[:, 0], idxs[:, 1]]
+                
+                # Filter significant motion
+                mask = pix_val >= 1e-3
+                u = u[mask]
+                v = v[mask]
+                pix_val = pix_val[mask]
+                
+                if u.numel() > 0:
+                    # Calculate camera parameters
+                    fov_rad = deg2rad(fov_degrees)
+                    focal_len = (curr_img.shape[1] * 0.5) / np.tan(fov_rad * 0.5)
+                    
+                    # Generate rays
+                    x = u - 0.5 * curr_img.shape[1]
+                    y = -(v - 0.5 * curr_img.shape[0])
+                    z = torch.full_like(x, -focal_len)
+                    rays_cam = torch.stack([x, y, z], dim=1)
+                    rays_cam = torch.nn.functional.normalize(rays_cam, dim=1)
+                    rays_world = torch.matmul(rays_cam, cam_rot.T)
+                    rays_world = torch.nn.functional.normalize(rays_world, dim=1)
+                    
+                    # Cast rays and accumulate in voxel grid
+                    for idx in range(rays_world.shape[0]):
+                        ray_world = rays_world[idx]
+                        val = pix_val[idx]
+                        steps = cast_ray_into_grid(
+                            cam_pos, ray_world, N, voxel_size, grid_center_tensor
+                        )
+                        for rs in steps:
+                            ix, iy, iz, dist = rs
+                            attenuation = 1.0 / (1.0 + alpha * dist)
+                            vval = val * attenuation
+                            if 0 <= ix < N and 0 <= iy < N and 0 <= iz < N:
+                                voxel_grid[ix, iy, iz] += vval
+            
+            prev_img = curr_img
+            frame_count += 1
+            
+            if frame_count % 10 == 0:
+                print(f"Processed {frame_count}/{max_frames} frames")
+    
+    finally:
+        cap.release()
+    
+    print(f"Processed {frame_count} frames from RTSP stream")
+    return voxel_grid
 
 
 # 5) Voxel DDA (Ray Casting)
